@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # API FastAPI
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: sirene-api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - HDFS_HOST=hdfs
+      - ENVIRONMENT=development
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - sirene-network
+
+  # Frontend React
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: sirene-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    networks:
+      - sirene-network
+
+  # Redis (Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: sirene-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - sirene-network
+
+  # HDFS NameNode
+  hdfs-namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: sirene-hdfs-namenode
+    environment:
+      - CLUSTER_NAME=sirene
+    ports:
+      - "9870:9870"  # Web UI
+      - "9000:9000"  # HDFS
+    volumes:
+      - hdfs-namenode-data:/hadoop/dfs/name
+    networks:
+      - sirene-network
+
+  # HDFS DataNode
+  hdfs-datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: sirene-hdfs-datanode
+    environment:
+      - SERVICE_PRECONDITION=sirene-hdfs-namenode:9870
+    ports:
+      - "9864:9864"  # Web UI
+    volumes:
+      - hdfs-datanode-data:/hadoop/dfs/data
+    depends_on:
+      - hdfs-namenode
+    networks:
+      - sirene-network
+
+  # Spark Master
+  spark-master:
+    image: bde2020/spark-master:3.0.0-hadoop3.2
+    container_name: sirene-spark-master
+    environment:
+      - INIT_DAEMON_STEP=setup_spark
+    ports:
+      - "8080:8080"  # Web UI
+      - "7077:7077"  # Spark
+    volumes:
+      - spark-master-data:/spark
+    depends_on:
+      - hdfs-namenode
+    networks:
+      - sirene-network
+
+  # Spark Worker
+  spark-worker:
+    image: bde2020/spark-worker:3.0.0-hadoop3.2
+    container_name: sirene-spark-worker
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+    ports:
+      - "8081:8081"  # Web UI
+    volumes:
+      - spark-worker-data:/spark
+    depends_on:
+      - spark-master
+    networks:
+      - sirene-network
+
+  # ETL Service (optionnel, pour lancer l'ETL via Docker)
+  etl:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.etl
+    container_name: sirene-etl
+    environment:
+      - HDFS_HOST=hdfs-namenode
+      - ENVIRONMENT=development
+    volumes:
+      - ./data:/app/data
+      - ./dataset:/app/dataset
+      - ./logs:/app/logs
+    depends_on:
+      - hdfs-namenode
+      - redis
+    networks:
+      - sirene-network
+    profiles:
+      - etl  # Service optionnel, activé avec --profile etl
+
+volumes:
+  redis-data:
+  hdfs-namenode-data:
+  hdfs-datanode-data:
+  spark-master-data:
+  spark-worker-data:
+
+networks:
+  sirene-network:
+    driver: bridge
+

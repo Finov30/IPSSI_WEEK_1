@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Installer les dépendances système
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Installer UV
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Copier les fichiers de configuration
+COPY pyproject.toml ./
+COPY uv.lock* ./
+
+# Installer les dépendances
+RUN uv sync --frozen
+
+# Copier le code source
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY dataset/ ./dataset/
+
+# Créer les dossiers de données
+RUN mkdir -p data/raw data/processed data/aggregated logs/etl
+
+# Commande par défaut
+CMD ["uv", "run", "python", "scripts/run_etl.py"]
+
