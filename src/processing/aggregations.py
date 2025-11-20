@@ -151,6 +151,11 @@ def aggregate_usecase2_sexe_dirigeants(
         logger.warning("Aucune donnée avec Sexe_Dirigeant valide")
         return pd.DataFrame(columns=["sexe", "secteur", "region", "nombre_entreprises"])
 
+    # Normaliser les valeurs de sexe (M, F en majuscules, supprimer espaces)
+    df_filtered["Sexe_Dirigeant"] = df_filtered["Sexe_Dirigeant"].astype(str).str.strip().str.upper()
+    # Filtrer uniquement M et F valides
+    df_filtered = df_filtered[df_filtered["Sexe_Dirigeant"].isin(["M", "F"])]
+
     # Extraire le secteur
     df_filtered["secteur"] = df_filtered["Code_APE_Entreprise"].apply(get_secteur_from_ape)
 

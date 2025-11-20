@@ -31,7 +31,7 @@ run-api: env-file ## Lance l'API FastAPI
 	uv run uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 
 run-frontend: ## Lance le frontend React
-	cd src/frontend && npm start
+	cd src/frontend && npm run dev
 
 test: env-file ## Lance les tests
 	uv run pytest tests/ -v --cov=src --cov-report=html
