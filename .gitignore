@@ -38,6 +38,7 @@ env/
 *.swp
 *.swo
 *~
+.claude/
 
 # Node.js
 node_modules/

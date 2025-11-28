@@ -8,23 +8,33 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: sirene-api
     ports:
-      - "8001:8000"
+      - "8001:8001"
     environment:
       - REDIS_HOST=redis
       - HDFS_HOST=sirene-hdfs-namenode
       - HDFS_PORT=8020
-      - ENVIRONMENT=development
+      - HDFS_PATH=/sirene_data
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
       - ./src:/app/src
       - ./scripts:/app/scripts
     depends_on:
-      - redis
-      - hdfs-namenode
-      - hdfs-datanode
+      hdfs-namenode:
+        condition: service_healthy
+      hdfs-datanode:
+        condition: service_healthy
+      redis:
+        condition: service_started
     networks:
       - sirene-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Frontend React
   frontend:
@@ -35,9 +45,11 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - api
+      api:
+        condition: service_started
     networks:
       - sirene-network
+    restart: unless-stopped
 
   # Redis (Cache)
   redis:
@@ -50,6 +62,12 @@ services:
     command: redis-server --appendonly yes
     networks:
       - sirene-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   # HDFS NameNode
   hdfs-namenode:
@@ -59,12 +77,19 @@ services:
     environment:
       - CLUSTER_NAME=sirene
     ports:
-      - "9870:9870"  # Web UI + WebHDFS
-      - "9000:8020"  # HDFS RPC (interne 8020 -> externe 9000)
+      - "9870:9870"
+      - "9000:8020"
     volumes:
       - hdfs-namenode-data:/hadoop/dfs/name
     networks:
       - sirene-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # HDFS DataNode
   hdfs-datanode:
@@ -75,13 +100,21 @@ services:
       - SERVICE_PRECONDITION=sirene-hdfs-namenode:9870
       - CORE_CONF_fs_defaultFS=hdfs://sirene-hdfs-namenode:8020
     ports:
-      - "9864:9864"  # Web UI + WebHDFS DataNode
+      - "9864:9864"
     volumes:
       - hdfs-datanode-data:/hadoop/dfs/data
     depends_on:
-      - hdfs-namenode
+      hdfs-namenode:
+        condition: service_healthy
     networks:
       - sirene-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9864/jmx?qry=Hadoop:service=DataNode,name=DataNodeInfo || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # ETL Service (pour lancer l'ETL via Docker dans le meme reseau)
   etl:
@@ -91,7 +124,7 @@ services:
     container_name: sirene-etl
     environment:
       - HDFS_HOST=sirene-hdfs-namenode
-      - HDFS_PORT=9000
+      - HDFS_PORT=8020
       - REDIS_HOST=redis
       - ENVIRONMENT=development
       - DATASET_CSV_PATH=${DATASET_CSV_PATH:-./dataset/100k.csv}
@@ -118,7 +151,7 @@ services:
     container_name: sirene-check-hdfs
     environment:
       - HDFS_HOST=sirene-hdfs-namenode
-      - HDFS_PORT=9000
+      - HDFS_PORT=8020
       - REDIS_HOST=redis
       - ENVIRONMENT=development
       - DATASET_CSV_PATH=${DATASET_CSV_PATH:-./dataset/100k.csv}

@@ -1,4 +1,4 @@
-.PHONY: help install setup env-file run-etl run-api run-frontend test lint format clean docker-up docker-down dev dev-stop
+.PHONY: help install setup env-file run-etl run-api run-frontend test lint format clean docker-up docker-down dev dev-stop start stop restart rebuild status logs-api logs-frontend logs-hdfs health
 
 help: ## Affiche l'aide
 	@echo "Commandes disponibles:"
@@ -20,7 +20,7 @@ run-etl: env-file ## Lance le pipeline ETL (depuis WSL, nécessite port mappé)
 
 run-etl-docker: ## Lance le pipeline ETL dans Docker (recommandé, même réseau)
 	@echo "Construction et démarrage du service ETL dans Docker..."
-	docker-compose --profile etl run --rm --build -it etl
+	docker-compose --profile etl run --rm --build etl
 
 check-hdfs-data: env-file ## Vérifie les données ETL dans HDFS (depuis WSL, PyArrow peut échouer)
 	@echo "Vérification des données HDFS..."
@@ -107,3 +107,50 @@ dev-stop: ## Arrête toutes les ressources de développement
 	@-taskkill //F //IM node.exe 2>/dev/null || true
 	@echo "[OK] Toutes les ressources arrêtées"
 
+
+# === Commandes simplifiées ===
+
+start: ## Démarre tous les services (build + up)
+	@echo "🚀 Construction et démarrage des services..."
+	docker-compose up -d --build
+	@echo "✓ Services démarrés"
+	@echo "  - API: http://localhost:8001"
+	@echo "  - Frontend: http://localhost:3000"
+	@echo "  - HDFS UI: http://localhost:9870"
+
+stop: ## Arrête tous les services
+	@echo "🛑 Arrêt des services..."
+	docker-compose down
+	@echo "✓ Services arrêtés"
+
+restart: ## Redémarre tous les services
+	@echo "🔄 Redémarrage des services..."
+	docker-compose down
+	docker-compose up -d --build
+	@echo "✓ Services redémarrés"
+
+rebuild: ## Reconstruit les images sans cache et redémarre
+	@echo "🔧 Reconstruction complète..."
+	docker-compose down -v
+	docker-compose build --no-cache
+	docker-compose up -d
+	@echo "✓ Reconstruction terminée"
+
+status: ## Affiche le statut des services
+	@echo "📊 Statut des services:"
+	@docker-compose ps
+
+logs-api: ## Logs de l'API uniquement
+	docker-compose logs -f api
+
+logs-frontend: ## Logs du frontend uniquement
+	docker-compose logs -f frontend
+
+logs-hdfs: ## Logs HDFS
+	docker-compose logs -f hdfs-namenode hdfs-datanode
+
+health: ## Vérifie la santé des services
+	@echo "🏥 Vérification de la santé des services..."
+	@curl -s http://localhost:8001/health | python3 -m json.tool 2>/dev/null || echo "❌ API non disponible"
+	@curl -s http://localhost:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus > /dev/null 2>&1 && echo "✓ HDFS NameNode OK" || echo "❌ HDFS NameNode non disponible"
+	@docker exec sirene-redis redis-cli ping > /dev/null 2>&1 && echo "✓ Redis OK" || echo "❌ Redis non disponible"
