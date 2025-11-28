@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow.fs as pafs
 
 from src.config.settings import get_settings
 from src.utils.ape_utils import get_secteur_from_ape
@@ -13,57 +14,126 @@ from src.utils.date_utils import extract_year
 logger = logging.getLogger(__name__)
 
 
+def _get_hdfs_filesystem() -> pafs.HadoopFileSystem | None:
+    """
+    Crée et retourne une connexion au système de fichiers HDFS.
+
+    Returns:
+        Instance de HadoopFileSystem ou None si la connexion échoue
+    """
+    settings = get_settings()
+    try:
+        fs = pafs.HadoopFileSystem(
+            host=settings.hdfs_host,
+            port=settings.hdfs_port,
+            user="root",
+        )
+        return fs
+    except Exception as e:
+        logger.debug(f"Connexion HDFS non disponible: {e}")
+        return None
+
+
 def load_processed_data(data_path: str | None = None, use_test_data: bool = False) -> pd.DataFrame:
     """
-    Charge les données traitées depuis les fichiers Parquet.
+    Charge les données traitées depuis HDFS UNIQUEMENT.
+
+    Cette fonction ne fait PAS de fallback vers le stockage local.
+    HDFS doit être disponible et les données doivent y être présentes.
 
     Args:
-        data_path: Chemin vers les données traitées. Si None, utilise le chemin des settings.
+        data_path: Ignoré (conservé pour compatibilité). Les données viennent toujours de HDFS.
         use_test_data: Si True, charge les données de test (test_100k) en priorité.
 
     Returns:
-        DataFrame avec toutes les données traitées
+        DataFrame avec toutes les données traitées depuis HDFS
+
+    Raises:
+        ConnectionError: Si HDFS n'est pas accessible
+        FileNotFoundError: Si aucune donnée n'est trouvée dans HDFS
     """
     settings = get_settings()
-    base_path = Path(data_path or settings.data_processed_path)
 
-    # Si use_test_data, chercher d'abord dans test_100k
+    # Obtenir la connexion HDFS (obligatoire)
+    fs = _get_hdfs_filesystem()
+    if fs is None:
+        error_msg = (
+            "HDFS n'est pas accessible. "
+            "Assurez-vous que HDFS est démarré: docker-compose up -d hdfs-namenode hdfs-datanode"
+        )
+        logger.error(error_msg)
+        raise ConnectionError(error_msg)
+
+    # Déterminer le chemin HDFS
+    hdfs_base_path = settings.hdfs_path
     if use_test_data:
-        test_path = base_path / "test_100k"
-        if test_path.exists():
-            processed_path = test_path
-            logger.info(f"Chargement des données de test depuis: {processed_path}")
-        else:
-            processed_path = base_path
-            logger.info(f"Données de test non trouvées, utilisation de: {processed_path}")
+        hdfs_path = f"{hdfs_base_path}/processed/test_100k"
     else:
-        processed_path = base_path
+        hdfs_path = f"{hdfs_base_path}/processed"
 
-    if not processed_path.exists():
-        logger.warning(f"Répertoire de données traitées introuvable: {processed_path}")
-        return pd.DataFrame()
+    logger.info(f"Chargement depuis HDFS: {hdfs_path}")
 
-    # Charger tous les fichiers Parquet
-    parquet_files = list(processed_path.glob("*.parquet"))
-    if not parquet_files:
-        logger.warning(f"Aucun fichier Parquet trouvé dans: {processed_path}")
-        return pd.DataFrame()
+    try:
+        # Lister les fichiers Parquet dans HDFS
+        file_infos = fs.get_file_info(pafs.FileSelector(hdfs_path, recursive=True))
+        parquet_files = [
+            info.path
+            for info in file_infos
+            if info.is_file and info.path.endswith(".parquet")
+        ]
 
-    logger.info(f"Chargement de {len(parquet_files)} fichiers Parquet...")
-    dfs = []
-    for parquet_file in parquet_files:
-        try:
-            df = pd.read_parquet(parquet_file)
-            dfs.append(df)
-        except Exception as e:
-            logger.error(f"Erreur lors du chargement de {parquet_file}: {e}")
+        if not parquet_files:
+            error_msg = (
+                f"Aucun fichier Parquet trouvé dans HDFS: {hdfs_path}. "
+                "Lancez 'make run-etl' pour traiter les données et les charger dans HDFS."
+            )
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
 
-    if not dfs:
-        return pd.DataFrame()
+        logger.info(f"Trouvé {len(parquet_files)} fichiers Parquet dans HDFS")
+        
+        # Optimisation: charger en parallèle avec ThreadPoolExecutor pour accélérer
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        dfs = []
+        loaded_count = 0
+        
+        def load_parquet_file(hdfs_file: str) -> tuple[str, pd.DataFrame | None]:
+            """Charge un fichier Parquet depuis HDFS."""
+            try:
+                df = pd.read_parquet(hdfs_file, filesystem=fs)
+                return hdfs_file, df
+            except Exception as e:
+                logger.error(f"Erreur lors du chargement de {hdfs_file} depuis HDFS: {e}")
+                return hdfs_file, None
+        
+        # Charger les fichiers en parallèle (max 10 workers pour éviter la surcharge)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_file = {executor.submit(load_parquet_file, hdfs_file): hdfs_file for hdfs_file in parquet_files}
+            
+            for future in as_completed(future_to_file):
+                hdfs_file, df = future.result()
+                if df is not None:
+                    dfs.append(df)
+                    loaded_count += 1
+                    if loaded_count % 50 == 0:
+                        logger.info(f"Chargement en cours: {loaded_count}/{len(parquet_files)} fichiers...")
 
-    result = pd.concat(dfs, ignore_index=True)
-    logger.info(f"Données chargées: {len(result):,} lignes")
-    return result
+        if not dfs:
+            error_msg = "Aucune donnée n'a pu être chargée depuis HDFS"
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
+
+        result = pd.concat(dfs, ignore_index=True)
+        logger.info(f"✓ Données chargées depuis HDFS: {len(result):,} lignes depuis {len(dfs)} fichiers")
+        return result
+
+    except (FileNotFoundError, ConnectionError):
+        # Re-lancer les erreurs critiques
+        raise
+    except Exception as e:
+        error_msg = f"Erreur lors de la lecture depuis HDFS: {e}"
+        logger.error(error_msg, exc_info=True)
+        raise ConnectionError(error_msg) from e
 
 
 def aggregate_usecase1_creations(

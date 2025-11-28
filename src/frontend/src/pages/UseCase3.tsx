@@ -19,7 +19,13 @@ const UseCase3 = () => {
     const fetchData = async () => {
       setLoading(true)
       try {
-        const result = await api.getEffectifs(filters)
+        // Convertir null en undefined pour l'API
+        const apiFilters = {
+          secteur: filters.secteur ?? undefined,
+          region: filters.region ?? undefined,
+          effectif: filters.effectif ?? undefined,
+        }
+        const result = await api.getEffectifs(apiFilters)
         setData(result)
       } catch (error) {
         console.error('Erreur lors du chargement des données:', error)

@@ -19,7 +19,13 @@ const UseCase5 = () => {
     const fetchData = async () => {
       setLoading(true)
       try {
-        const result = await api.getTypesJuridiques(filters)
+        // Convertir null en undefined pour l'API
+        const apiFilters = {
+          secteur: filters.secteur ?? undefined,
+          region: filters.region ?? undefined,
+          categorie_juridique: filters.categorie_juridique ?? undefined,
+        }
+        const result = await api.getTypesJuridiques(apiFilters)
         setData(result)
       } catch (error) {
         console.error('Erreur lors du chargement des données:', error)

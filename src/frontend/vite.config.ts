@@ -14,7 +14,7 @@ export default defineConfig({
     port: 3001, // Changé de 3000 à 3001 pour éviter le conflit avec Docker
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8001',
         changeOrigin: true,
       },
     },

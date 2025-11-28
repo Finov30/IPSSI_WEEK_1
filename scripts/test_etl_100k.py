@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # Ajouter le répertoire racine au path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -12,8 +14,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.config.logging import setup_logging
 from src.config.settings import get_settings
 from src.etl.extract import extract_csv_chunks
-from src.etl.load import load_to_parquet
 from src.etl.transform import transform_dataframe, validate_dataframe
+
+
+def save_to_local_parquet(df: pd.DataFrame, output_path: str) -> None:
+    """Sauvegarde un DataFrame vers un fichier Parquet local (pour les tests)."""
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(df)
+    pq.write_table(table, output_path, compression="snappy")
 
 # Configuration du logging
 setup_logging()
@@ -115,7 +124,7 @@ def test_etl_100k() -> None:
             # Chargement vers Parquet
             output_file = output_dir / f"chunk_{chunk_number:04d}.parquet"
             logger.info(f"\nSauvegarde vers: {output_file}")
-            load_to_parquet(chunk_transformed, str(output_file))
+            save_to_local_parquet(chunk_transformed, str(output_file))
             stats["fichiers_parquet_crees"] += 1
 
             # Vérifier le fichier créé

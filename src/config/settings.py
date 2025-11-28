@@ -9,23 +9,19 @@ class Settings(BaseSettings):
 
     # API Configuration
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8001
     api_reload: bool = True
 
     # HDFS Configuration
-    hdfs_host: str = "localhost"
-    hdfs_port: int = 9000
+    hdfs_host: str = "sirene-hdfs-namenode"  # Utiliser le DNS du service Docker
+    hdfs_port: int = 9000  # Port mappé (9000:8020 dans docker-compose) ou 8020 si dans Docker
     hdfs_path: str = "/sirene_data"
 
     # Redis Configuration
-    redis_host: str = "localhost"
+    redis_host: str = "localhost"  # "redis" si dans Docker
     redis_port: int = 6379
     redis_db: int = 0
     redis_password: str = ""
-
-    # Spark Configuration
-    spark_master: str = "local[*]"
-    spark_app_name: str = "sirene-dataviz"
 
     # Data Paths
     data_raw_path: str = "./data/raw"

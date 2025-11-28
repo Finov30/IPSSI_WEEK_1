@@ -8,16 +8,21 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: sirene-api
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       - REDIS_HOST=redis
-      - HDFS_HOST=hdfs
+      - HDFS_HOST=sirene-hdfs-namenode
+      - HDFS_PORT=8020
       - ENVIRONMENT=development
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./src:/app/src
+      - ./scripts:/app/scripts
     depends_on:
       - redis
+      - hdfs-namenode
+      - hdfs-datanode
     networks:
       - sirene-network
 
@@ -50,11 +55,12 @@ services:
   hdfs-namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: sirene-hdfs-namenode
+    hostname: sirene-hdfs-namenode
     environment:
       - CLUSTER_NAME=sirene
     ports:
-      - "9870:9870"  # Web UI
-      - "9000:9000"  # HDFS
+      - "9870:9870"  # Web UI + WebHDFS
+      - "9000:8020"  # HDFS RPC (interne 8020 -> externe 9000)
     volumes:
       - hdfs-namenode-data:/hadoop/dfs/name
     networks:
@@ -64,10 +70,12 @@ services:
   hdfs-datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: sirene-hdfs-datanode
+    hostname: sirene-hdfs-datanode
     environment:
       - SERVICE_PRECONDITION=sirene-hdfs-namenode:9870
+      - CORE_CONF_fs_defaultFS=hdfs://sirene-hdfs-namenode:8020
     ports:
-      - "9864:9864"  # Web UI
+      - "9864:9864"  # Web UI + WebHDFS DataNode
     volumes:
       - hdfs-datanode-data:/hadoop/dfs/data
     depends_on:
@@ -75,66 +83,65 @@ services:
     networks:
       - sirene-network
 
-  # Spark Master
-  spark-master:
-    image: bde2020/spark-master:3.0.0-hadoop3.2
-    container_name: sirene-spark-master
-    environment:
-      - INIT_DAEMON_STEP=setup_spark
-    ports:
-      - "8080:8080"  # Web UI
-      - "7077:7077"  # Spark
-    volumes:
-      - spark-master-data:/spark
-    depends_on:
-      - hdfs-namenode
-    networks:
-      - sirene-network
-
-  # Spark Worker
-  spark-worker:
-    image: bde2020/spark-worker:3.0.0-hadoop3.2
-    container_name: sirene-spark-worker
-    environment:
-      - SPARK_MASTER=spark://spark-master:7077
-    ports:
-      - "8081:8081"  # Web UI
-    volumes:
-      - spark-worker-data:/spark
-    depends_on:
-      - spark-master
-    networks:
-      - sirene-network
-
-  # ETL Service (optionnel, pour lancer l'ETL via Docker)
+  # ETL Service (pour lancer l'ETL via Docker dans le meme reseau)
   etl:
     build:
       context: .
       dockerfile: docker/Dockerfile.etl
     container_name: sirene-etl
     environment:
-      - HDFS_HOST=hdfs-namenode
+      - HDFS_HOST=sirene-hdfs-namenode
+      - HDFS_PORT=9000
+      - REDIS_HOST=redis
       - ENVIRONMENT=development
+      - DATASET_CSV_PATH=${DATASET_CSV_PATH:-./dataset/100k.csv}
     volumes:
       - ./data:/app/data
       - ./dataset:/app/dataset
       - ./logs:/app/logs
+      - ./scripts:/app/scripts
+      - ./src:/app/src
     depends_on:
       - hdfs-namenode
+      - hdfs-datanode
       - redis
     networks:
       - sirene-network
     profiles:
-      - etl  # Service optionnel, activé avec --profile etl
+      - etl  # Service optionnel, active avec --profile etl
+
+  # Script de verification HDFS (pour executer check_hdfs_data dans Docker)
+  check-hdfs:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.etl
+    container_name: sirene-check-hdfs
+    environment:
+      - HDFS_HOST=sirene-hdfs-namenode
+      - HDFS_PORT=9000
+      - REDIS_HOST=redis
+      - ENVIRONMENT=development
+      - DATASET_CSV_PATH=${DATASET_CSV_PATH:-./dataset/100k.csv}
+    volumes:
+      - ./data:/app/data
+      - ./dataset:/app/dataset
+      - ./logs:/app/logs
+      - ./scripts:/app/scripts
+      - ./src:/app/src
+    depends_on:
+      - hdfs-namenode
+      - hdfs-datanode
+    networks:
+      - sirene-network
+    profiles:
+      - check  # Service optionnel, active avec --profile check
+    command: ["python", "scripts/check_hdfs_data.py"]
 
 volumes:
   redis-data:
   hdfs-namenode-data:
   hdfs-datanode-data:
-  spark-master-data:
-  spark-worker-data:
 
 networks:
   sirene-network:
     driver: bridge
-

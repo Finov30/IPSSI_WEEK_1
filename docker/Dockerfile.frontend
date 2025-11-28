@@ -1,4 +1,4 @@
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -17,8 +17,8 @@ RUN npm run build
 # Stage de production
 FROM nginx:alpine
 
-# Copier les fichiers buildés
-COPY --from=builder /app/build /usr/share/nginx/html
+# Copier les fichiers buildés (Vite génère dans dist par défaut)
+COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Copier la configuration nginx
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf

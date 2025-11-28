@@ -1,12 +1,153 @@
+# Stage 1: Préparer libhdfs.so depuis l'image HDFS (sans installer de packages)
+FROM bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8 AS hadoop-libs
+RUN mkdir -p /hadoop-libs/native && \
+    # Trouver et copier libhdfs.so depuis tous les emplacements possibles
+    (find / -name "libhdfs.so*" -type f 2>/dev/null | head -1 | xargs -I {} cp {} /hadoop-libs/native/ 2>/dev/null || true) && \
+    # Si pas trouvé, essayer les emplacements standards
+    (test -f /opt/hadoop/lib/native/libhdfs.so && cp /opt/hadoop/lib/native/libhdfs.so* /hadoop-libs/native/ || true) && \
+    (test -f /usr/local/hadoop/lib/native/libhdfs.so && cp /usr/local/hadoop/lib/native/libhdfs.so* /hadoop-libs/native/ || true) && \
+    (test -f /hadoop/lib/native/libhdfs.so && cp /hadoop/lib/native/libhdfs.so* /hadoop-libs/native/ || true) && \
+    # Lister ce qui a été copié pour debug
+    echo "=== libhdfs.so trouvé ===" && \
+    ls -la /hadoop-libs/native/ || echo "Aucun libhdfs.so trouvé dans l'image"
+
+# Stage 2: Image finale avec Python et les bibliothèques Hadoop
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Installer les dépendances système
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Installer les dépendances système (incluant Java pour PyArrow HDFS)
+# Installer Java en premier (le plus important pour PyArrow HDFS)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends default-jdk && \
+    rm -rf /var/lib/apt/lists/*
+
+# Configurer JAVA_HOME pour PyArrow
+RUN update-alternatives --install /usr/bin/java java /usr/lib/jvm/default-java/bin/java 1 && \
+    update-alternatives --install /usr/bin/javac javac /usr/lib/jvm/default-java/bin/javac 1
+
+# JAVA_HOME sera détecté automatiquement, mais on peut le définir explicitement
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Installer wget pour télécharger Hadoop
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copier libhdfs.so depuis le stage hadoop-libs (si disponible)
+RUN mkdir -p /tmp/hadoop-libs
+COPY --from=hadoop-libs /hadoop-libs/native/ /tmp/hadoop-libs/native/
+
+# Télécharger Hadoop pour obtenir libhdfs.so et les JARs
+RUN mkdir -p /opt/hadoop/lib/native /opt/hadoop/share/hadoop/common && \
+    echo "Téléchargement de Hadoop 3.2.1..." && \
+    cd /tmp && \
+    wget -q https://archive.apache.org/dist/hadoop/common/hadoop-3.2.1/hadoop-3.2.1.tar.gz && \
+    tar -xzf hadoop-3.2.1.tar.gz && \
+    # Copier libhdfs.so depuis le téléchargement
+    cp hadoop-3.2.1/lib/native/libhdfs.so* /opt/hadoop/lib/native/ 2>/dev/null || true && \
+    # Copier libhdfs.so depuis le stage hadoop-libs si disponible (priorité)
+    if [ -d /tmp/hadoop-libs/native ] && [ "$(ls -A /tmp/hadoop-libs/native 2>/dev/null)" ]; then \
+        cp /tmp/hadoop-libs/native/* /opt/hadoop/lib/native/ 2>/dev/null || true; \
+    fi && \
+    # Copier tous les JARs nécessaires
+    cp hadoop-3.2.1/share/hadoop/common/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    cp hadoop-3.2.1/share/hadoop/common/lib/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    cp hadoop-3.2.1/share/hadoop/hdfs/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    cp hadoop-3.2.1/share/hadoop/hdfs/lib/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    rm -rf hadoop-3.2.1* /tmp/hadoop-libs
+
+# Créer un lien symbolique libhdfs.so si le fichier s'appelle libhdfs.so.0.0.0 ou autre variante
+RUN cd /opt/hadoop/lib/native && \
+    if [ -f libhdfs.so.0.0.0 ] && [ ! -f libhdfs.so ]; then \
+        ln -s libhdfs.so.0.0.0 libhdfs.so; \
+    fi && \
+    if [ -f libhdfs.so.* ] && [ ! -f libhdfs.so ]; then \
+        ln -s libhdfs.so.* libhdfs.so 2>/dev/null || \
+        cp libhdfs.so.* libhdfs.so 2>/dev/null || true; \
+    fi && \
+    # Vérifier que libhdfs.so existe maintenant
+    if [ ! -f libhdfs.so ]; then \
+        echo "ERREUR: libhdfs.so non trouvé après création du lien!" && \
+        ls -la /opt/hadoop/lib/native/ && \
+        exit 1; \
+    fi && \
+    echo "✓ libhdfs.so trouvé/créé" && \
+    ls -la /opt/hadoop/lib/native/libhdfs.so* && \
+    # Vérifier que les JARs sont bien copiés
+    echo "=== Vérification des JARs ===" && \
+    echo "JARs dans /opt/hadoop/share/hadoop/common:" && \
+    ls -la /opt/hadoop/share/hadoop/common/*.jar 2>/dev/null | head -10 || echo "Aucun JAR trouvé!" && \
+    JAR_COUNT=$(ls /opt/hadoop/share/hadoop/common/*.jar 2>/dev/null | wc -l) && \
+    if [ "$JAR_COUNT" -eq 0 ]; then \
+        echo "ERREUR: Aucun JAR Hadoop trouvé!" && \
+        echo "Contenu de /opt/hadoop/share/hadoop/common:" && \
+        ls -la /opt/hadoop/share/hadoop/common/ && \
+        exit 1; \
+    fi && \
+    echo "✓ JARs trouvés: $JAR_COUNT fichiers"
+
+# Configurer les variables d'environnement pour PyArrow
+RUN echo "/opt/hadoop/lib/native" > /etc/ld.so.conf.d/hadoop.conf && \
+    ldconfig
+
+# Créer un script pour configurer le CLASSPATH dynamiquement
+RUN printf '#!/bin/bash\n\
+set -e\n\
+# Vérifier que libhdfs.so existe\n\
+if [ ! -f /opt/hadoop/lib/native/libhdfs.so ]; then\n\
+  echo "ERREUR: libhdfs.so non trouvé dans /opt/hadoop/lib/native/"\n\
+  echo "Contenu du répertoire:"\n\
+  ls -la /opt/hadoop/lib/native/ || true\n\
+  exit 1\n\
+fi\n\
+# Construire le CLASSPATH avec tous les JARs Hadoop trouvés\n\
+export CLASSPATH=$(find /opt/hadoop/share/hadoop/common -name "*.jar" -type f 2>/dev/null | tr "\\n" ":")\n\
+# Retirer le dernier ":" si présent\n\
+export CLASSPATH=${CLASSPATH%:}\n\
+if [ -z "$CLASSPATH" ]; then\n\
+  echo "ERREUR: Aucun JAR Hadoop trouvé dans /opt/hadoop/share/hadoop/common"\n\
+  echo "Contenu du répertoire:"\n\
+  ls -la /opt/hadoop/share/hadoop/common/ || true\n\
+  echo "Recherche dans d'\''autres emplacements..."\n\
+  find /opt/hadoop -name "*.jar" -type f 2>/dev/null | head -10\n\
+  exit 1\n\
+fi\n\
+echo "✓ CLASSPATH configuré avec $(echo $CLASSPATH | tr ":" "\\n" | wc -l) JARs"\n\
+# Variables d'\''environnement pour PyArrow HDFS\n\
+export HADOOP_HOME=/opt/hadoop\n\
+export LD_LIBRARY_PATH=/opt/hadoop/lib/native:${LD_LIBRARY_PATH}\n\
+export ARROW_LIBHDFS_DIR=/opt/hadoop/lib/native\n\
+# Recharger ldconfig pour s'\''assurer que libhdfs.so est trouvé\n\
+ldconfig\n\
+# Vérifier que libhdfs.so peut être chargé\n\
+if ! ldconfig -p | grep -q libhdfs; then\n\
+  echo "AVERTISSEMENT: libhdfs.so non trouvé par ldconfig"\n\
+  echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"\n\
+  echo "Contenu de /opt/hadoop/lib/native/:"\n\
+  ls -la /opt/hadoop/lib/native/\n\
+fi\n\
+# Exécuter la commande passée en argument\n\
+exec "$@"\n' > /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh
+
+# Variables d'environnement de base (le CLASSPATH sera construit par le script)
+ENV HADOOP_HOME=/opt/hadoop
+ENV LD_LIBRARY_PATH=/opt/hadoop/lib/native
+ENV ARROW_LIBHDFS_DIR=/opt/hadoop/lib/native
+
+# Installer gcc et g++ séparément (peuvent échouer à cause de problèmes réseau, mais ne sont pas critiques pour PyArrow)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --fix-missing gcc g++ || \
+    (echo "Warning: gcc/g++ installation failed, but continuing..." && true) && \
+    rm -rf /var/lib/apt/lists/*
+
+# Installer Docker CLI pour pouvoir exécuter des commandes docker exec (optionnel, pour check_hdfs)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.5.tgz | tar zxvf - --strip 1 -C /usr/local/bin docker/docker && \
+    rm -rf /var/lib/apt/lists/*
 
 # Installer UV
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -14,6 +155,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Copier les fichiers de configuration
 COPY pyproject.toml ./
 COPY uv.lock* ./
+
+# Créer un README.md minimal (requis par hatchling si spécifié dans pyproject.toml)
+RUN echo -e "# Sirene DataViz\n\nVisualisation interactive des données Sirene" > README.md
 
 # Installer les dépendances
 RUN uv sync --frozen
@@ -25,6 +169,9 @@ COPY dataset/ ./dataset/
 
 # Créer les dossiers de données
 RUN mkdir -p data/raw data/processed data/aggregated logs/etl
+
+# Utiliser le script d'entrée pour configurer le CLASSPATH
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Commande par défaut
 CMD ["uv", "run", "python", "scripts/run_etl.py"]

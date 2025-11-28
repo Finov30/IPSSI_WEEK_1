@@ -20,10 +20,23 @@ const UseCase1 = () => {
       setLoading(true)
       try {
         // Ne pas filtrer par année pour voir l'évolution complète
-        const result = await api.getCreations(filters)
+        // Convertir null en undefined pour l'API
+        const apiFilters = {
+          secteur: filters.secteur ?? undefined,
+          region: filters.region ?? undefined,
+        }
+        const result = await api.getCreations(apiFilters)
         setData(result)
-      } catch (error) {
+      } catch (error: any) {
         console.error('Erreur lors du chargement des données:', error)
+        // Afficher un message d'erreur à l'utilisateur
+        if (error.response) {
+          console.error('Erreur API:', error.response.status, error.response.data)
+        } else if (error.request) {
+          console.error('Pas de réponse de l\'API:', error.request)
+        }
+        // Ne pas réessayer en boucle si erreur
+        setData([])
       } finally {
         setLoading(false)
       }

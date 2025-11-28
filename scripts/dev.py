@@ -1,20 +1,22 @@
-"""Script pour lancer l'environnement de développement complet."""
+"""Script pour lancer l'environnement de developpement complet."""
 
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+# Ajouter le repertoire racine au path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 
 def run_command(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    """Exécute une commande."""
+    """Execute une commande."""
     print(f"[EXEC] {' '.join(cmd)}")
     return subprocess.run(cmd, check=check)
 
 
 def check_docker_service(service: str) -> bool:
-    """Vérifie si un service Docker est en cours d'exécution."""
+    """Verifie si un service Docker est en cours d'execution."""
     try:
         result = subprocess.run(
             ["docker", "ps", "--filter", f"name={service}", "--format", "{{.Names}}"],
@@ -38,161 +40,157 @@ def wait_for_redis(max_wait: int = 30) -> bool:
                 check=False,
             )
             if result.returncode == 0:
-                print("[OK] Redis est prêt")
+                print("[OK] Redis est pret")
                 return True
         except Exception:
             pass
         time.sleep(1)
-    print("[WARN] Redis n'est pas encore prêt, continuation...")
+    print("[WARN] Redis n'est pas encore pret, continuation...")
+    return False
+
+
+def wait_for_hdfs(max_wait: int = 60) -> bool:
+    """Attend que HDFS soit disponible."""
+    print("[WAIT] Attente de HDFS...")
+
+    for i in range(max_wait):
+        try:
+            # Verifier que le container NameNode est en cours d'execution
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "name=sirene-hdfs-namenode", "--format", "{{.Status}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if "Up" not in result.stdout:
+                time.sleep(2)
+                continue
+
+            # Tester une operation HDFS simple
+            test_cmd = [
+                "docker", "exec", "sirene-hdfs-namenode",
+                "hdfs", "dfs", "-ls", "/"
+            ]
+            test_result = subprocess.run(test_cmd, capture_output=True, check=False, timeout=10)
+
+            if test_result.returncode == 0:
+                # Verifier que le DataNode est enregistre
+                report_cmd = [
+                    "docker", "exec", "sirene-hdfs-namenode",
+                    "hdfs", "dfsadmin", "-report"
+                ]
+                report_result = subprocess.run(
+                    report_cmd, capture_output=True, text=True, check=False, timeout=10
+                )
+                if report_result.returncode == 0 and "Live datanodes" in report_result.stdout:
+                    print("[OK] HDFS est pret")
+                    return True
+
+        except Exception:
+            pass
+
+        if i % 10 == 0 and i > 0:
+            print(f"[WAIT] HDFS: initialisation... ({i}/{max_wait}s)")
+
+        time.sleep(2)
+
+    print("[WARN] HDFS n'est pas encore completement pret, continuation...")
     return False
 
 
 def main() -> None:
     """Fonction principale."""
     print("=" * 60)
-    print("  Démarrage de l'environnement de développement")
+    print("  Demarrage de l'environnement de developpement")
     print("=" * 60)
     print()
 
-    # Vérifier que Docker est disponible
+    # Verifier que Docker est disponible
     try:
         subprocess.run(["docker", "--version"], check=True, capture_output=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("[ERROR] Docker n'est pas installé ou non disponible")
+        print("[ERROR] Docker n'est pas installe ou non disponible")
         sys.exit(1)
 
-    # 1. Démarrer les services Docker
-    print("[1/4] Démarrage des services Docker (Redis, HDFS, Spark)...")
-    
-    # Liste des conteneurs à vérifier
-    containers_to_check = [
-        "sirene-hdfs-namenode",
-        "sirene-hdfs-datanode",
-        "sirene-spark-master",
-        "sirene-spark-worker",
-        "sirene-redis",
-    ]
-    
+    # 1. Demarrer les services Docker
+    print("[1/4] Demarrage des services Docker (Redis, HDFS, Frontend)...")
+
     try:
-        # Arrêter tous les conteneurs liés à ce projet (y compris les orphelins)
-        print("[INFO] Nettoyage des conteneurs existants...")
-        subprocess.run(
-            ["docker-compose", "down", "--remove-orphans"],
-            capture_output=True,
-            check=False,
-        )
-        
-        # Vérifier et supprimer les conteneurs orphelins qui pourraient utiliser les ports
-        for container_name in containers_to_check:
-            # Vérifier si le conteneur existe (en cours d'exécution ou arrêté)
-            result = subprocess.run(
-                ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if container_name in result.stdout:
-                print(f"[INFO] Suppression du conteneur {container_name}...")
-                subprocess.run(
-                    ["docker", "rm", "-f", container_name],
-                    capture_output=True,
-                    check=False,
-                )
-        
-        time.sleep(2)
-        
-        run_command(
-            [
-                "docker-compose",
-                "up",
-                "-d",
-                "redis",
-                "hdfs-namenode",
-                "hdfs-datanode",
-                "spark-master",
-                "spark-worker",
-            ]
-        )
-        print("[OK] Services Docker démarrés")
+        run_command([
+            "docker-compose", "up", "-d", "--build",
+            "redis", "hdfs-namenode", "hdfs-datanode", "frontend"
+        ])
+        print("[OK] Services Docker demarres")
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Erreur lors du démarrage Docker: {e}")
-        print("[INFO] Tentative de nettoyage complet...")
-        subprocess.run(
-            ["docker-compose", "down", "--remove-orphans"],
-            capture_output=True,
-            check=False,
-        )
-        # Supprimer les conteneurs orphelins manuellement
-        for container_name in containers_to_check:
-            subprocess.run(
-                ["docker", "rm", "-f", container_name],
-                capture_output=True,
-                check=False,
-            )
-        print("[INFO] Veuillez vérifier les ports utilisés et réessayer")
-        print("[INFO] Vous pouvez vérifier avec: docker ps -a | grep sirene")
+        print(f"[ERROR] Erreur lors du demarrage Docker: {e}")
         sys.exit(1)
 
     print()
 
-    # 2. Attendre que les services soient prêts
-    print("[2/4] Attente de la disponibilité des services...")
+    # 2. Attendre que les services soient prets
+    print("[2/4] Attente de la disponibilite des services...")
     wait_for_redis()
-    time.sleep(3)  # Attendre un peu pour HDFS et Spark
-    print("[OK] Services prêts")
+    wait_for_hdfs()
+    time.sleep(3)
+    print("[OK] Services prets")
     print()
 
-    # 3. Afficher les informations
-    print("[3/4] Informations des services:")
+    # 3. Verifier que le frontend est demarre
+    print("[3/4] Verification du frontend...")
+    if check_docker_service("sirene-frontend"):
+        print("[OK] Frontend Docker demarre")
+    else:
+        print("[WARN] Frontend Docker non detecte, mais peut etre en cours de demarrage...")
+    print()
+
+    # 4. Afficher les informations
+    print("[4/4] Informations des services:")
     print("=" * 60)
     print("  Services disponibles:")
-    print("  - API: http://localhost:8000")
+    print("  - API: http://localhost:8001")
     print("  - Frontend: http://localhost:3000")
     print("  - Redis: localhost:6379")
     print("  - HDFS NameNode: http://localhost:9870")
-    print("  - Spark Master: http://localhost:8080")
     print("=" * 60)
     print()
 
-    # 4. Lancer l'API et le Frontend
-    print("[4/4] Démarrage de l'API et du Frontend...")
-    print()
-    print("Pour arrêter: make dev-stop")
-    print()
+    # 5. Lancer l'API (seulement si le port est libre, sinon on suppose qu'elle tourne dans Docker)
+    api_cmd = ["uv", "run", "uvicorn", "src.api.main:app", "--reload", "--host", "0.0.0.0", "--port", "8001"]
 
-    # Lancer l'API
-    print("[INFO] Démarrage de l'API sur http://localhost:8000")
-    api_cmd = ["uv", "run", "uvicorn", "src.api.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]
-    
-    # Lancer le frontend si le dossier existe
-    frontend_path = Path("src/frontend")
-    if frontend_path.exists() and (frontend_path / "package.json").exists():
-        print("[INFO] Démarrage du Frontend sur http://localhost:3000")
-        print()
-        print("⚠️  L'API et le Frontend doivent être lancés dans des terminaux séparés:")
-        print()
-        print("Terminal 1 (API):")
-        print(f"  {' '.join(api_cmd)}")
-        print()
-        print("Terminal 2 (Frontend):")
-        print("  cd src/frontend && npm start")
-        print()
-    else:
-        print("[INFO] Frontend non trouvé, lancement de l'API uniquement")
-        print()
-        print("Pour lancer l'API, exécutez:")
-        print(f"  {' '.join(api_cmd)}")
-        print()
-
-    # Option: lancer l'API directement
+    # Verifier si le port 8001 est deja utilise
     try:
-        print("[INFO] Lancement de l'API...")
-        print("Appuyez sur Ctrl+C pour arrêter")
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex(("localhost", 8001))
+        sock.close()
+        if result == 0:
+            print("L'API est déjà en cours d'exécution sur le port 8001.")
+            print("Environnement de developpement prêt !")
+            print("Pour arrêter: make dev-stop")
+            
+            # Boucle infinie pour garder le script actif (comme un service)
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print()
+                print("[INFO] Arret demande")
+                sys.exit(0)
+    except Exception:
+        pass
+
+    print("[INFO] Demarrage de l'API locale...")
+    print("Pour arreter: make dev-stop")
+    print()
+
+    try:
+        print("Appuyez sur Ctrl+C pour arreter")
         print()
         run_command(api_cmd, check=False)
     except KeyboardInterrupt:
         print()
-        print("[INFO] Arrêt demandé")
+        print("[INFO] Arret demande")
         sys.exit(0)
 
 
@@ -201,9 +199,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print()
-        print("[INFO] Arrêt demandé")
+        print("[INFO] Arret demande")
         sys.exit(0)
     except Exception as e:
         print(f"[ERROR] Erreur: {e}", file=sys.stderr)
         sys.exit(1)
-

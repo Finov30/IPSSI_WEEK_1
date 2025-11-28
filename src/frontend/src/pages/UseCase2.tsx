@@ -22,7 +22,13 @@ const UseCase2 = () => {
     const fetchData = async () => {
       setLoading(true)
       try {
-        const result = await api.getSexeDirigeants(filters)
+        // Convertir null en undefined pour l'API
+        const apiFilters = {
+          sexe: filters.sexe ?? undefined,
+          secteur: filters.secteur ?? undefined,
+          region: filters.region ?? undefined,
+        }
+        const result = await api.getSexeDirigeants(apiFilters)
         setData(result)
       } catch (error) {
         console.error('Erreur lors du chargement des données:', error)
@@ -139,7 +145,7 @@ const UseCase2 = () => {
                     fill="#8884d8"
                     dataKey="value"
                   >
-                    {pieData.map((entry, index) => (
+                    {pieData.map((_, index) => (
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>

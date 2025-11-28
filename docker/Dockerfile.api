@@ -1,6 +1,79 @@
+# Stage 1: Préparer libhdfs.so depuis l'image HDFS
+FROM bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8 AS hadoop-libs
+RUN mkdir -p /hadoop-libs/native && \
+    (find / -name "libhdfs.so*" -type f 2>/dev/null | head -1 | xargs -I {} cp {} /hadoop-libs/native/ 2>/dev/null || true) && \
+    (test -f /opt/hadoop/lib/native/libhdfs.so && cp /opt/hadoop/lib/native/libhdfs.so* /hadoop-libs/native/ || true) && \
+    (test -f /usr/local/hadoop/lib/native/libhdfs.so && cp /usr/local/hadoop/lib/native/libhdfs.so* /hadoop-libs/native/ || true) && \
+    (test -f /hadoop/lib/native/libhdfs.so && cp /hadoop/lib/native/libhdfs.so* /hadoop-libs/native/ || true)
+
+# Stage 2: Image finale avec Python et les bibliothèques Hadoop
 FROM python:3.11-slim
 
 WORKDIR /app
+
+# Installer Java (requis pour PyArrow HDFS)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends default-jdk && \
+    rm -rf /var/lib/apt/lists/*
+
+# Configurer JAVA_HOME
+RUN update-alternatives --install /usr/bin/java java /usr/lib/jvm/default-java/bin/java 1 && \
+    update-alternatives --install /usr/bin/javac javac /usr/lib/jvm/default-java/bin/javac 1
+
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Installer wget pour télécharger Hadoop
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copier libhdfs.so depuis le stage hadoop-libs
+RUN mkdir -p /tmp/hadoop-libs
+COPY --from=hadoop-libs /hadoop-libs/native/ /tmp/hadoop-libs/native/
+
+# Télécharger Hadoop pour obtenir libhdfs.so et les JARs
+RUN mkdir -p /opt/hadoop/lib/native /opt/hadoop/share/hadoop/common && \
+    cd /tmp && \
+    wget -q https://archive.apache.org/dist/hadoop/common/hadoop-3.2.1/hadoop-3.2.1.tar.gz && \
+    tar -xzf hadoop-3.2.1.tar.gz && \
+    cp hadoop-3.2.1/lib/native/libhdfs.so* /opt/hadoop/lib/native/ 2>/dev/null || true && \
+    if [ -d /tmp/hadoop-libs/native ] && [ "$(ls -A /tmp/hadoop-libs/native 2>/dev/null)" ]; then \
+        cp /tmp/hadoop-libs/native/* /opt/hadoop/lib/native/ 2>/dev/null || true; \
+    fi && \
+    cp hadoop-3.2.1/share/hadoop/common/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    cp hadoop-3.2.1/share/hadoop/common/lib/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    cp hadoop-3.2.1/share/hadoop/hdfs/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    cp hadoop-3.2.1/share/hadoop/hdfs/lib/*.jar /opt/hadoop/share/hadoop/common/ 2>/dev/null || true && \
+    rm -rf hadoop-3.2.1* /tmp/hadoop-libs && \
+    cd /opt/hadoop/lib/native && \
+    if [ -f libhdfs.so.0.0.0 ] && [ ! -f libhdfs.so ]; then \
+        ln -s libhdfs.so.0.0.0 libhdfs.so; \
+    fi && \
+    if [ -f libhdfs.so.* ] && [ ! -f libhdfs.so ]; then \
+        ln -s libhdfs.so.* libhdfs.so 2>/dev/null || \
+        cp libhdfs.so.* libhdfs.so 2>/dev/null || true; \
+    fi
+
+# Configurer les variables d'environnement pour PyArrow
+RUN echo "/opt/hadoop/lib/native" > /etc/ld.so.conf.d/hadoop.conf && \
+    ldconfig
+
+# Créer un script pour configurer le CLASSPATH dynamiquement
+RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
+    echo 'set -e' >> /usr/local/bin/entrypoint.sh && \
+    echo 'export CLASSPATH=$(find /opt/hadoop/share/hadoop/common -name "*.jar" -type f 2>/dev/null | tr "\n" ":")' >> /usr/local/bin/entrypoint.sh && \
+    echo 'export CLASSPATH=${CLASSPATH%:}' >> /usr/local/bin/entrypoint.sh && \
+    echo 'export HADOOP_HOME=/opt/hadoop' >> /usr/local/bin/entrypoint.sh && \
+    echo 'export LD_LIBRARY_PATH=/opt/hadoop/lib/native:${LD_LIBRARY_PATH}' >> /usr/local/bin/entrypoint.sh && \
+    echo 'export ARROW_LIBHDFS_DIR=/opt/hadoop/lib/native' >> /usr/local/bin/entrypoint.sh && \
+    echo 'ldconfig' >> /usr/local/bin/entrypoint.sh && \
+    echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh
+
+ENV HADOOP_HOME=/opt/hadoop
+ENV LD_LIBRARY_PATH=/opt/hadoop/lib/native
+ENV ARROW_LIBHDFS_DIR=/opt/hadoop/lib/native
 
 # Installer UV
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -8,6 +81,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Copier les fichiers de configuration
 COPY pyproject.toml ./
 COPY uv.lock* ./
+COPY README.md ./
 
 # Installer les dépendances
 RUN uv sync --frozen
@@ -17,8 +91,11 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 
 # Exposer le port
-EXPOSE 8000
+EXPOSE 8001
+
+# Utiliser le script d'entrée pour configurer le CLASSPATH
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Commande par défaut
-CMD ["uv", "run", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8001"]
 

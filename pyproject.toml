@@ -8,7 +8,6 @@ license = {text = "MIT"}
 
 dependencies = [
     "pandas>=2.0.0",
-    "pyspark>=3.5.0",
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.5.0",
@@ -19,6 +18,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "tqdm>=4.66.0",
     "httpx>=0.25.0",
+    "pyspark>=3.5.0",
 ]
 
 [project.optional-dependencies]
